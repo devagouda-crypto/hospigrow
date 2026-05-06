@@ -1,0 +1,120 @@
+# Local development stack — full version with Celery worker/beat.
+# Mock backends enabled by default so you can demo without GNU Health/ERPNext.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hospigrow-postgres
+    environment:
+      POSTGRES_DB: hospigrow
+      POSTGRES_USER: hospigrow
+      POSTGRES_PASSWORD: hospigrow
+    ports: ["5432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hospigrow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: hospigrow-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+
+  openldap:
+    image: bitnami/openldap:2.6
+    container_name: hospigrow-ldap
+    environment:
+      LDAP_ROOT: dc=hospigrow,dc=com
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: admin
+      LDAP_USERS: testdoctor,testpatient
+      LDAP_PASSWORDS: doctor123,patient123
+      LDAP_USER_DC: users
+    ports: ["1389:1389"]
+    volumes:
+      - ldap-data:/bitnami/openldap
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: hospigrow-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/hospigrow
+      KC_DB_USERNAME: hospigrow
+      KC_DB_PASSWORD: hospigrow
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    command: start-dev --import-realm
+    ports: ["8080:8080"]
+    volumes:
+      - ./infra/keycloak/realm-export.json:/opt/keycloak/data/import/realm.json:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  middleware:
+    build:
+      context: ./services/middleware
+    container_name: hospigrow-middleware
+    environment:
+      ENV: development
+      MOCK_BACKENDS: "true"
+      DATABASE_URL: postgresql+asyncpg://hospigrow:hospigrow@postgres:5432/hospigrow
+      REDIS_URL: redis://redis:6379/0
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/hospigrow
+      KEYCLOAK_AUDIENCE: middleware
+      ERPNEXT_BASE_URL: ${HOSPIGROW_ERPNEXT_BASE_URL:-https://staff.hospigrow.com}
+      ERPNEXT_API_KEY: ${HOSPIGROW_ERPNEXT_API_KEY:-}
+      ERPNEXT_API_SECRET: ${HOSPIGROW_ERPNEXT_API_SECRET:-}
+      GNUHEALTH_BASE_URL: ${HOSPIGROW_GNUHEALTH_BASE_URL:-https://suite.hospigrow.com}
+      GNUHEALTH_DATABASE: ${HOSPIGROW_GNUHEALTH_DATABASE:-gnuhealth}
+      GNUHEALTH_USERNAME: ${HOSPIGROW_GNUHEALTH_USERNAME:-admin}
+      GNUHEALTH_PASSWORD: ${HOSPIGROW_GNUHEALTH_PASSWORD:-}
+      ABDM_BASE_URL: ${HOSPIGROW_ABDM_BASE_URL:-https://dev.abdm.gov.in}
+      ABDM_CLIENT_ID: ${HOSPIGROW_ABDM_CLIENT_ID:-}
+      ABDM_CLIENT_SECRET: ${HOSPIGROW_ABDM_CLIENT_SECRET:-}
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      keycloak: { condition: service_started }
+
+  worker:
+    build:
+      context: ./services/middleware
+    container_name: hospigrow-worker
+    command: celery -A app.workers.celery_app worker --loglevel=info
+    environment:
+      ENV: development
+      DATABASE_URL: postgresql+asyncpg://hospigrow:hospigrow@postgres:5432/hospigrow
+      REDIS_URL: redis://redis:6379/0
+      ERPNEXT_BASE_URL: ${HOSPIGROW_ERPNEXT_BASE_URL:-https://staff.hospigrow.com}
+      ERPNEXT_API_KEY: ${HOSPIGROW_ERPNEXT_API_KEY:-}
+      ERPNEXT_API_SECRET: ${HOSPIGROW_ERPNEXT_API_SECRET:-}
+    depends_on:
+      redis: { condition: service_healthy }
+
+  beat:
+    build:
+      context: ./services/middleware
+    container_name: hospigrow-beat
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    environment:
+      ENV: development
+      DATABASE_URL: postgresql+asyncpg://hospigrow:hospigrow@postgres:5432/hospigrow
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  ldap-data:
